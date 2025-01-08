@@ -1,0 +1,157 @@
+import requests
+import sqlite3
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+import joblib
+
+# RugCheckXYZ API credentials
+rugcheck_api_key = "YOUR_RUGCHECKXYZ_API_KEY"
+rugcheck_service_url = "https://api.rugcheckxyz.com/v1/token/verify"
+
+# GMGN API credentials
+gmgn_api_key = "YOUR_GMGN_API_KEY"
+gmgn_service_url = "https://api.gmgn.io/v1/tokens"
+
+# Pump.fun API credentials
+pumpfun_api_key = "YOUR_PUMPFUN_API_KEY"
+pumpfun_service_url = "https://api.pumpfun.io/v1/tokens"
+
+# Telegram Bot API credentials
+telegram_bot_token = "Ez5cWYeTXZZPjow6qJ4vGen75RgNZWPKshFA8sp3s34p"
+telegram_chat_id = "@toxi_solana_bot"
+telegram_send_url = f"https://api.telegram.org/bot{Ez5cWYeTXZZPjow6qJ4vGen75RgNZWPKshFA8sp3s34p}/sendMessage"
+
+# Database setup
+db_name = "meme_coins.db"
+
+def initialize_database():
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS verified_tokens (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        contract_address TEXT UNIQUE,
+                        name TEXT,
+                        verification_status TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                      )''')
+    conn.commit()
+    conn.close()
+
+# Verify token contract address using RugCheckXYZ
+def verify_contract_address(contract_address):
+    headers = {"Authorization": f"Bearer {rugcheck_api_key}"}
+    params = {"contract_address": contract_address}
+    response = requests.get(rugcheck_service_url, headers=headers, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("status", "Unknown"), data.get("name", "Unknown")
+    else:
+        print(f"Error verifying contract address {contract_address}: {response.status_code}")
+        return "Error", "Unknown"
+
+# Fetch tokens from GMGN
+def fetch_gmgn_tokens():
+    headers = {"Authorization": f"Bearer {gmgn_api_key}"}
+    response = requests.get(gmgn_service_url, headers=headers)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error fetching tokens from GMGN: {response.status_code}")
+        return []
+
+# Fetch tokens from Pump.fun
+def fetch_pumpfun_tokens():
+    headers = {"Authorization": f"Bearer {pumpfun_api_key}"}
+    response = requests.get(pumpfun_service_url, headers=headers)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error fetching tokens from Pump.fun: {response.status_code}")
+        return []
+
+# Save verified tokens to the database
+def save_verified_token(contract_address, name, verification_status):
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''INSERT INTO verified_tokens (contract_address, name, verification_status) 
+                          VALUES (?, ?, ?)''',
+                       (contract_address, name, verification_status))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        print(f"Contract address {contract_address} already exists in the database.")
+    finally:
+        conn.close()
+
+# Send token details to Telegram
+def send_to_telegram(contract_address, name):
+    message = f"Verified Token:\nName: {name}\nContract Address: {contract_address}"
+    params = {"chat_id": telegram_chat_id, "text": message}
+    response = requests.get(telegram_send_url, params=params)
+
+    if response.status_code == 200:
+        print(f"Successfully sent token {contract_address} to Telegram.")
+    else:
+        print(f"Failed to send token {contract_address} to Telegram: {response.status_code}")
+
+# Train a predictive model for token success
+def train_model(data_file):
+    data = pd.read_csv(data_file)
+    X = data.drop(columns=["success"])
+    y = data["success"]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    model = RandomForestClassifier(random_state=42)
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_test)
+    accuracy = accuracy_score(y_test, predictions)
+
+    print(f"Model trained with accuracy: {accuracy:.2f}")
+    joblib.dump(model, "token_success_model.pkl")
+
+# Predict token success
+def predict_token_success(features):
+    model = joblib.load("token_success_model.pkl")
+    prediction = model.predict([features])
+    return prediction[0]
+
+# Main script
+def main():
+    initialize_database()
+
+    # Fetch tokens from GMGN and Pump.fun
+    gmgn_tokens = fetch_gmgn_tokens()
+    pumpfun_tokens = fetch_pumpfun_tokens()
+
+    all_tokens = gmgn_tokens + pumpfun_tokens
+
+    for token in all_tokens:
+        contract_address = token.get("contract_address")
+        print(f"Verifying contract address: {contract_address}")
+        status, name = verify_contract_address(contract_address)
+
+        if status == "Good":
+            print(f"{contract_address} is verified as 'Good'. Saving to database and sending to Telegram.")
+            save_verified_token(contract_address, name, status)
+            send_to_telegram(contract_address, name)
+        else:
+            print(f"{contract_address} is not marked as 'Good'. Skipping.")
+
+    # Train model on historical data
+    train_model("historical_data.csv")
+
+    # Example token features for prediction
+    example_features = [1000, 500, 0.8, 0.05]  # Replace with actual feature values
+    success_prediction = predict_token_success(example_features)
+    print(f"Token success prediction: {'Successful' if success_prediction == 1 else 'Unsuccessful'}")
+
+if __name__ == "__main__":
+    main()
